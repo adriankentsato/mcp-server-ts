@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Server Debugger</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { margin-bottom: 20px; color: #4ecca3; }
+    .section { background: #16213e; padding: 20px; margin-bottom: 20px; border-radius: 8px; }
+    h2 { margin-bottom: 15px; color: #4ecca3; font-size: 1.2rem; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; color: #aaa; }
+    input, textarea, select { width: 100%; padding: 10px; background: #0f3460; border: 1px solid #4ecca3; border-radius: 4px; color: #eee; font-size: 14px; }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: #4ecca3; }
+    button { padding: 10px 20px; background: #4ecca3; color: #1a1a2e; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+    button:hover { background: #45b594; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    .log { background: #0f3460; padding: 15px; border-radius: 4px; max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+    .log-entry { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #333; }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: #888; }
+    .log-request { color: #4ecca3; }
+    .log-response { color: #e94560; }
+    .log-error { color: #ff6b6b; }
+    .tools-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+    .tool-item { background: #0f3460; padding: 10px; border-radius: 4px; cursor: pointer; }
+    .tool-item:hover { background: #1a1a2e; }
+    .tool-name { font-weight: bold; color: #4ecca3; }
+    .tool-desc { font-size: 12px; color: #aaa; margin-top: 5px; }
+    .status { padding: 5px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+    .status.connected { background: #4ecca3; color: #1a1a2e; }
+    .status.disconnected { background: #e94560; color: #eee; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>MCP Server Debugger</h1>
+    
+    <div class="section">
+      <h2>Authentication</h2>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="username" value="admin">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="password" value="changeme">
+      </div>
+      <button id="authBtn" onclick="authenticate()">Authenticate</button>
+      <span id="authStatus" class="status disconnected">Disconnected</span>
+    </div>
+
+    <div class="section">
+      <h2>Available Tools</h2>
+      <div id="toolsList" class="tools-list"></div>
+    </div>
+
+    <div class="section">
+      <h2>Execute Tool</h2>
+      <div class="form-group">
+        <label>Tool</label>
+        <select id="toolSelect">
+          <option value="">Select a tool</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Arguments (JSON)</label>
+        <textarea id="toolArgs" rows="5" placeholder='{"message": "hello"}'></textarea>
+      </div>
+      <button id="executeBtn" onclick="executeTool()" disabled>Execute</button>
+    </div>
+
+    <div class="section">
+      <h2>Activity Log</h2>
+      <div id="log" class="log"></div>
+      <button onclick="clearLog()" style="margin-top: 10px;">Clear Log</button>
+    </div>
+  </div>
+
+  <script>
+    let accessToken = null;
+    let sessionId = null;
+    const baseUrl = window.location.origin;
+
+    function log(message, type = 'info') {
+      const logDiv = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      const time = new Date().toLocaleTimeString();
+      const className = type === 'request' ? 'log-request' : type === 'response' ? 'log-response' : type === 'error' ? 'log-error' : '';
+      entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="${className}">${message}</span>`;
+      logDiv.appendChild(entry);
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function clearLog() {
+      document.getElementById('log').innerHTML = '';
+    }
+
+    async function authenticate() {
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+
+      try {
+        log('Authenticating...', 'request');
+        const response = await fetch(`${baseUrl}/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grant_type: 'password',
+            username,
+            password,
+          }),
+        });
+
+        const data = await response.json();
+        if (response.ok) {
+          accessToken = data.access_token;
+          document.getElementById('authStatus').textContent = 'Connected';
+          document.getElementById('authStatus').className = 'status connected';
+          document.getElementById('executeBtn').disabled = false;
+          log('Authentication successful', 'response');
+          await initializeSession();
+          await loadTools();
+        } else {
+          log(`Authentication failed: ${data.error_description || data.error}`, 'error');
+        }
+      } catch (error) {
+        log(`Authentication error: ${error.message}`, 'error');
+      }
+    }
+
+    async function initializeSession() {
+      try {
+        log('Initializing MCP session...', 'request');
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2024-11-05',
+              capabilities: {},
+              clientInfo: {
+                name: 'debugger',
+                version: '1.0.0',
+              },
+            },
+          }),
+        });
+
+        sessionId = response.headers.get('Mcp-Session-Id');
+        const data = await response.json();
+        log(`Session initialized: ${sessionId}`, 'response');
+      } catch (error) {
+        log(`Session initialization error: ${error.message}`, 'error');
+      }
+    }
+
+    async function loadTools() {
+      try {
+        log('Loading tools...', 'request');
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'Mcp-Session-Id': sessionId,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+          }),
+        });
+
+        const data = await response.json();
+        if (data.result && data.result.tools) {
+          const toolsList = document.getElementById('toolsList');
+          const toolSelect = document.getElementById('toolSelect');
+          toolsList.innerHTML = '';
+          toolSelect.innerHTML = '<option value="">Select a tool</option>';
+
+          data.result.tools.forEach(tool => {
+            const toolItem = document.createElement('div');
+            toolItem.className = 'tool-item';
+            toolItem.innerHTML = `<div class="tool-name">${tool.name}</div><div class="tool-desc">${tool.description}</div>`;
+            toolItem.onclick = () => selectTool(tool);
+            toolsList.appendChild(toolItem);
+
+            const option = document.createElement('option');
+            option.value = tool.name;
+            option.textContent = tool.name;
+            toolSelect.appendChild(option);
+          });
+
+          log(`Loaded ${data.result.tools.length} tools`, 'response');
+        }
+      } catch (error) {
+        log(`Load tools error: ${error.message}`, 'error');
+      }
+    }
+
+    function selectTool(tool) {
+      document.getElementById('toolSelect').value = tool.name;
+      if (tool.inputSchema && tool.inputSchema.properties) {
+        document.getElementById('toolArgs').value = JSON.stringify(tool.inputSchema.properties, null, 2);
+      }
+    }
+
+    async function executeTool() {
+      const toolName = document.getElementById('toolSelect').value;
+      const argsText = document.getElementById('toolArgs').value;
+
+      if (!toolName) {
+        log('Please select a tool', 'error');
+        return;
+      }
+
+      let args = {};
+      try {
+        args = argsText ? JSON.parse(argsText) : {};
+      } catch (error) {
+        log(`Invalid JSON arguments: ${error.message}`, 'error');
+        return;
+      }
+
+      try {
+        log(`Executing tool: ${toolName}`, 'request');
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'Mcp-Session-Id': sessionId,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'tools/call',
+            params: {
+              name: toolName,
+              arguments: args,
+            },
+          }),
+        });
+
+        const data = await response.json();
+        log(`Tool response: ${JSON.stringify(data, null, 2)}`, 'response');
+      } catch (error) {
+        log(`Execute tool error: ${error.message}`, 'error');
+      }
+    }
+  </script>
+</body>
+</html>
